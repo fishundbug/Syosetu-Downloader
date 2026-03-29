@@ -87,26 +87,43 @@ def fetch_chapter(url: str) -> tuple[str, str]:
     title_tag = soup.select_one("h1.p-novel__title")
     title = title_tag.get_text(strip=True) if title_tag else "无标题"
 
-    # 提取正文区域（区分正文和后记）
+    # 提取正文区域（区分前言、正文主体、后记）
+    # 页面可能包含三种 div：
+    #   p-novel__text--preface   → 前言（作者备注）
+    #   p-novel__text            → 正文主体（不带 preface/afterword 修饰符）
+    #   p-novel__text--afterword → 后记
     body_divs = soup.select("div.js-novel-text.p-novel__text")
+    preface_div = None
     main_div = None
     afterword_div = None
     for div in body_divs:
         classes = div.get("class", [])
-        if "p-novel__text--afterword" in classes:
+        if "p-novel__text--preface" in classes:
+            preface_div = div
+        elif "p-novel__text--afterword" in classes:
             afterword_div = div
-        elif main_div is None:
+        else:
             main_div = div
 
     if not main_div:
         raise RuntimeError("未找到正文区域（div.js-novel-text.p-novel__text）")
 
-    body_text = _extract_text_from_div(main_div)
+    parts = []
 
-    # 如果存在后记，追加在正文后面
+    # 前言
+    if preface_div:
+        parts.append(_extract_text_from_div(preface_div))
+        parts.append("*" * 48)
+
+    # 正文主体
+    parts.append(_extract_text_from_div(main_div))
+
+    # 后记
     if afterword_div:
-        afterword_text = _extract_text_from_div(afterword_div)
-        body_text += "\n\n" + "*" * 48 + "\n\n" + afterword_text
+        parts.append("*" * 48)
+        parts.append(_extract_text_from_div(afterword_div))
+
+    body_text = "\n\n".join(parts)
 
     return title, body_text
 
@@ -163,7 +180,6 @@ def fetch_novel_chapter_links(novel_url: str) -> tuple[str, list[str]]:
             next_href = next_link.get("href", "")
             current_url = urljoin(current_url, next_href) if next_href else None
             page_num += 1
-            _random_delay()
         else:
             current_url = None
 
@@ -183,21 +199,48 @@ def download_novel_batch(novel_url: str, output_dir: Path):
         print("  ✗ 未找到任何章节链接。")
         return
 
+    total = len(chapter_urls)
     print(f"\n  书名：{novel_title}")
-    print(f"  共找到 {len(chapter_urls)} 个章节")
+    print(f"  共找到 {total} 个章节")
 
-    # 第二步：让用户选择保存方式
+    # 第二步：用户交互设置
+    # --- 保存方式 ---
     print()
     print("  请选择保存方式：")
     print("    [1] 合并为单个 TXT 文件")
     print("    [2] 每章单独保存为一个 TXT 文件")
     choice = input("  请输入选项 (1/2)：").strip()
-
     if choice not in ("1", "2"):
         print("  无效选项，默认使用分章保存。")
         choice = "2"
-
     merge_mode = (choice == "1")
+
+    # --- 下载范围 ---
+    print(f"\n  下载范围（共 {total} 章）：")
+    range_input = input("  直接回车下载全部，或输入范围（如 10-50）：").strip()
+    start_idx, end_idx = 0, total
+    if range_input:
+        range_match = re.match(r"(\d+)\s*[-~]\s*(\d+)", range_input)
+        if range_match:
+            start_idx = max(0, int(range_match.group(1)) - 1)  # 转为 0-based
+            end_idx = min(total, int(range_match.group(2)))
+            if start_idx >= end_idx:
+                print("  无效范围，将下载全部。")
+                start_idx, end_idx = 0, total
+        else:
+            print("  格式无法识别，将下载全部。")
+
+    selected_urls = chapter_urls[start_idx:end_idx]
+    selected_total = len(selected_urls)
+    print(f"  将下载第 {start_idx + 1} ~ {end_idx} 章，共 {selected_total} 章")
+
+    # --- 随机延迟开关 ---
+    delay_input = input("\n  启用随机延迟？(Y/n，默认启用)：").strip().lower()
+    use_delay = delay_input not in ("n", "no")
+    if use_delay:
+        print(f"  已启用随机延迟（{DELAY_MIN}~{DELAY_MAX}s）")
+    else:
+        print("  已关闭随机延迟（全速下载）")
 
     # 第三步：逐章下载
     # 提取 ncode 用于命名
@@ -206,15 +249,14 @@ def download_novel_batch(novel_url: str, output_dir: Path):
 
     if merge_mode:
         # 合并模式：所有章节写入同一个文件
-        # 文件名使用书名（过滤非法字符）
         safe_title = _sanitize_filename(novel_title)
         out_path = output_dir / f"{safe_title}.txt"
         print(f"\n  将合并保存至：{out_path}")
         print()
 
         merged_parts = []
-        for i, ch_url in enumerate(chapter_urls, 1):
-            print(f"  [{i}/{len(chapter_urls)}] 正在下载……", end="", flush=True)
+        for i, ch_url in enumerate(selected_urls, 1):
+            print(f"  [{i}/{selected_total}] 正在下载……", end="", flush=True)
             try:
                 title, body = fetch_chapter(ch_url)
                 merged_parts.append(f"{'═' * 48}\n{title}\n{'═' * 48}\n\n{body}")
@@ -223,7 +265,7 @@ def download_novel_batch(novel_url: str, output_dir: Path):
                 print(f" ✗ 失败：{e}")
                 merged_parts.append(f"{'═' * 48}\n[下载失败] {ch_url}\n{'═' * 48}")
 
-            if i < len(chapter_urls):
+            if use_delay and i < selected_total:
                 _random_delay()
 
         # 写入文件
@@ -239,12 +281,12 @@ def download_novel_batch(novel_url: str, output_dir: Path):
         print(f"\n  将保存至文件夹：{novel_dir}")
         print()
 
-        for i, ch_url in enumerate(chapter_urls, 1):
+        for i, ch_url in enumerate(selected_urls, 1):
             # 从 URL 提取章节号
             ch_match = re.search(r"/(\d+)/?$", ch_url)
-            ch_num = ch_match.group(1) if ch_match else str(i)
+            ch_num = ch_match.group(1) if ch_match else str(start_idx + i)
 
-            print(f"  [{i}/{len(chapter_urls)}] 正在下载……", end="", flush=True)
+            print(f"  [{i}/{selected_total}] 正在下载……", end="", flush=True)
             try:
                 title, body = fetch_chapter(ch_url)
                 filename = f"{ncode}-{ch_num}.txt"
@@ -254,7 +296,7 @@ def download_novel_batch(novel_url: str, output_dir: Path):
             except Exception as e:
                 print(f" ✗ 失败：{e}")
 
-            if i < len(chapter_urls):
+            if use_delay and i < selected_total:
                 _random_delay()
 
         print(f"\n  ✓ 全部完成！已保存至 → {novel_dir}")
