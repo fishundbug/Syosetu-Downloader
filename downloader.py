@@ -2,16 +2,17 @@
 Syosetu (小説家になろう) 章节下载器
 作者：fishundbug
 
-支持两种模式：
-  1. 单章下载：输入章节页面链接（如 .../n8611bv/561/）
-  2. 整本下载：输入小说目录页链接（如 .../n8611bv/）
+用法：
+  交互模式：python downloader.py
+  命令行模式：python downloader.py <URL> [-m 1|2] [-r 起-止] [--no-delay]
 
-整本下载时可选择：
-  A) 合并为单个 TXT 文件
-  B) 每章单独保存为一个 TXT 文件
+示例：
+  python downloader.py https://ncode.syosetu.com/n8611bv/ -m 1 -r 10-50 --no-delay
 """
 
+import argparse
 import re
+import shlex
 import time
 import random
 import requests
@@ -21,7 +22,7 @@ from urllib.parse import urljoin
 
 # 每次请求之间的随机延迟范围（秒）
 DELAY_MIN = 0.5
-DELAY_MAX = 1.2
+DELAY_MAX = 1.0
 
 HEADERS = {
     "User-Agent": (
@@ -166,10 +167,28 @@ def fetch_novel_chapter_links(novel_url: str) -> tuple[str, list[str]]:
     return novel_title, chapter_urls
 
 
-def download_novel_batch(novel_url: str, output_dir: Path):
+def _parse_range(range_str: str, total: int) -> tuple[int, int]:
+    """解析下载范围字符串，返回 (start_idx, end_idx) 0-based。"""
+    range_match = re.match(r"(\d+)\s*[-~]\s*(\d+)", range_str)
+    if range_match:
+        start = max(0, int(range_match.group(1)) - 1)
+        end = min(total, int(range_match.group(2)))
+        if start < end:
+            return start, end
+    print("  无效范围，将下载全部。")
+    return 0, total
+
+
+def download_novel_batch(
+    novel_url: str,
+    output_dir: Path,
+    mode: str | None = None,
+    range_str: str | None = None,
+    delay: bool | None = None,
+):
     """
     整本下载小说。
-    先获取所有章节链接，再让用户选择保存方式，最后逐章下载。
+    参数均为 None 时进入交互模式，否则跳过对应提示。
     """
     # 第一步：获取章节列表
     print("  正在获取章节列表……")
@@ -183,47 +202,49 @@ def download_novel_batch(novel_url: str, output_dir: Path):
     print(f"\n  书名：{novel_title}")
     print(f"  共找到 {total} 个章节")
 
-    # 第二步：用户交互设置
+    # 第二步：确定下载参数
     # --- 保存方式 ---
-    print()
-    print("  请选择保存方式：")
-    print("    [1] 合并为单个 TXT 文件")
-    print("    [2] 每章单独保存为一个 TXT 文件")
-    choice = input("  请输入选项 (1/2)：").strip()
-    if choice not in ("1", "2"):
-        print("  无效选项，默认使用分章保存。")
-        choice = "2"
-    merge_mode = (choice == "1")
+    if mode is not None:
+        merge_mode = (mode == "1")
+    else:
+        print()
+        print("  请选择保存方式：")
+        print("    [1] 合并为单个 TXT 文件")
+        print("    [2] 每章单独保存为一个 TXT 文件")
+        choice = input("  请输入选项 (1/2)：").strip()
+        if choice not in ("1", "2"):
+            print("  无效选项，默认使用分章保存。")
+            choice = "2"
+        merge_mode = (choice == "1")
 
     # --- 下载范围 ---
-    print(f"\n  下载范围（共 {total} 章）：")
-    range_input = input("  直接回车下载全部，或输入范围（如 10-50）：").strip()
-    start_idx, end_idx = 0, total
-    if range_input:
-        range_match = re.match(r"(\d+)\s*[-~]\s*(\d+)", range_input)
-        if range_match:
-            start_idx = max(0, int(range_match.group(1)) - 1)  # 转为 0-based
-            end_idx = min(total, int(range_match.group(2)))
-            if start_idx >= end_idx:
-                print("  无效范围，将下载全部。")
-                start_idx, end_idx = 0, total
+    if range_str is not None:
+        start_idx, end_idx = _parse_range(range_str, total)
+    else:
+        print(f"\n  下载范围（共 {total} 章）：")
+        range_input = input("  直接回车下载全部，或输入范围（如 10-50）：").strip()
+        if range_input:
+            start_idx, end_idx = _parse_range(range_input, total)
         else:
-            print("  格式无法识别，将下载全部。")
+            start_idx, end_idx = 0, total
 
     selected_urls = chapter_urls[start_idx:end_idx]
     selected_total = len(selected_urls)
     print(f"  将下载第 {start_idx + 1} ~ {end_idx} 章，共 {selected_total} 章")
 
     # --- 随机延迟开关 ---
-    delay_input = input("\n  启用随机延迟？(Y/n，默认启用)：").strip().lower()
-    use_delay = delay_input not in ("n", "no")
+    if delay is not None:
+        use_delay = delay
+    else:
+        delay_input = input("\n  启用随机延迟？(Y/n，默认启用)：").strip().lower()
+        use_delay = delay_input not in ("n", "no")
+
     if use_delay:
         print(f"  已启用随机延迟（{DELAY_MIN}~{DELAY_MAX}s）")
     else:
         print("  已关闭随机延迟（全速下载）")
 
     # 第三步：逐章下载
-    # 提取 ncode 用于命名
     ncode_match = re.search(r"syosetu\.com/([^/]+)", novel_url)
     ncode = ncode_match.group(1).upper() if ncode_match else "UNKNOWN"
 
@@ -248,13 +269,12 @@ def download_novel_batch(novel_url: str, output_dir: Path):
             if use_delay and i < selected_total:
                 _random_delay()
 
-        # 写入文件
         header = f"{novel_title}\n{'─' * 48}\n\n"
         out_path.write_text(header + "\n\n".join(merged_parts), encoding="utf-8")
         print(f"\n  ✓ 全部完成！已保存至 → {out_path}")
 
     else:
-        # 分章模式：每章一个文件，放在以书名命名的子文件夹中
+        # 分章模式：每章一个文件
         safe_title = _sanitize_filename(novel_title)
         novel_dir = output_dir / safe_title
         novel_dir.mkdir(exist_ok=True)
@@ -262,7 +282,6 @@ def download_novel_batch(novel_url: str, output_dir: Path):
         print()
 
         for i, ch_url in enumerate(selected_urls, 1):
-            # 从 URL 提取章节号
             ch_match = re.search(r"/(\d+)/?$", ch_url)
             ch_num = ch_match.group(1) if ch_match else str(start_idx + i)
 
@@ -290,37 +309,115 @@ def _sanitize_filename(name: str) -> str:
 
 # ─── 主程序 ──────────────────────────────────────────────────
 
+def _build_parser() -> argparse.ArgumentParser:
+    """构建命令行参数解析器。"""
+    parser = argparse.ArgumentParser(
+        description="Syosetu 章节下载器 — 支持单章下载与整本批量下载",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "使用示例:\n"
+            "  downloader.py                                 进入交互模式\n"
+            "  downloader.py <URL>                           整本下载(交互设置)\n"
+            "  downloader.py <URL> -m 1                      合并为单文件\n"
+            "  downloader.py <URL> -m 2 -r 10-50 --no-delay  分章+指定范围+全速\n"
+            "  downloader.py <URL>/5/                        单章下载\n"
+            "\n"
+            "不传任何参数时进入交互模式, 交互模式中同样支持附加参数。"
+        ),
+    )
+    parser.add_argument("url", nargs="?", default=None,
+                        metavar="URL", help="小说目录页或章节页链接")
+    parser.add_argument("-m", "--mode", choices=["1", "2"], metavar="N",
+                        help="保存方式: 1=合并单文件, 2=分章保存")
+    parser.add_argument("-r", "--range", dest="range_str", metavar="A-B",
+                        help="下载范围, 如 10-50")
+    parser.add_argument("--no-delay", action="store_true",
+                        help="关闭随机延迟, 全速下载")
+    return parser
+
+
 def main():
-    print("=" * 50)
-    print("  Syosetu 章节下载器")
-    print("  支持单章下载 / 整本下载")
-    print("  输入 q 或 quit 退出")
-    print("=" * 50)
+    parser = _build_parser()
+    args = parser.parse_args()
 
     # 输出目录：脚本所在文件夹下的 output 子目录
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(exist_ok=True)
 
-    while True:
-        print()
-        url = input("请输入链接（章节页 或 小说目录页）：").strip()
-
-        if url.lower() in ("q", "quit", "exit"):
-            print("已退出。")
-            break
-
-        if not url:
-            continue
-
+    if args.url:
+        # 命令行模式：直接执行
         try:
-            if is_single_chapter_url(url):
-                # 单章模式
-                download_single_chapter(url, output_dir)
+            if is_single_chapter_url(args.url):
+                download_single_chapter(args.url, output_dir)
             else:
-                # 整本模式
-                download_novel_batch(url, output_dir)
+                # 有任一参数指定时，直接传入跳过交互
+                delay = (not args.no_delay) if (args.no_delay or args.mode or args.range_str) else None
+                download_novel_batch(
+                    args.url, output_dir,
+                    mode=args.mode,
+                    range_str=args.range_str,
+                    delay=delay,
+                )
         except Exception as e:
             print(f"  ✗ 操作失败：{e}")
+    else:
+        # 交互模式
+        print("=" * 50)
+        print("  Syosetu 章节下载器")
+        print("  支持单章下载 / 整本下载")
+        print("=" * 50)
+        print()
+        print("  用法：直接输入 URL，或附加参数：")
+        print("    <URL>                    交互式设置")
+        print("    <URL> -m 1               合并为单文件")
+        print("    <URL> -m 2               分章保存")
+        print("    <URL> -r 10-50           指定下载范围")
+        print("    <URL> --no-delay         关闭随机延迟")
+        print("    <URL> -m 1 -r 10-50 --no-delay  组合使用")
+        print()
+        print("  输入 q 或 quit 退出")
+
+        while True:
+            print()
+            user_input = input(">>> ").strip()
+
+            if user_input.lower() in ("q", "quit", "exit"):
+                print("已退出。")
+                break
+
+            if not user_input:
+                continue
+
+            # 将用户输入拆分为参数列表，复用 argparse 解析
+            try:
+                tokens = shlex.split(user_input)
+            except ValueError:
+                tokens = user_input.split()
+
+            try:
+                iargs = parser.parse_args(tokens)
+            except SystemExit:
+                # argparse 遇到无效参数会调用 sys.exit，捕获后继续
+                continue
+
+            if not iargs.url:
+                print("  请输入 URL。")
+                continue
+
+            try:
+                if is_single_chapter_url(iargs.url):
+                    download_single_chapter(iargs.url, output_dir)
+                else:
+                    has_params = iargs.no_delay or iargs.mode or iargs.range_str
+                    delay = (not iargs.no_delay) if has_params else None
+                    download_novel_batch(
+                        iargs.url, output_dir,
+                        mode=iargs.mode,
+                        range_str=iargs.range_str,
+                        delay=delay,
+                    )
+            except Exception as e:
+                print(f"  ✗ 操作失败：{e}")
 
 
 if __name__ == "__main__":
