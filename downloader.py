@@ -87,41 +87,21 @@ def fetch_chapter(url: str) -> tuple[str, str]:
     title_tag = soup.select_one("h1.p-novel__title")
     title = title_tag.get_text(strip=True) if title_tag else "无标题"
 
-    # 提取正文区域（区分前言、正文主体、后记）
-    # 页面可能包含三种 div：
-    #   p-novel__text--preface   → 前言（作者备注）
-    #   p-novel__text            → 正文主体（不带 preface/afterword 修饰符）
-    #   p-novel__text--afterword → 后记
+    # 提取正文区域
+    # 按 HTML 原始顺序遍历所有 div，保留网页显示顺序
+    # 正文主体（无 -- 修饰符）直接输出，其他区域用分隔线隔开
     body_divs = soup.select("div.js-novel-text.p-novel__text")
-    preface_div = None
-    main_div = None
-    afterword_div = None
-    for div in body_divs:
-        classes = div.get("class", [])
-        if "p-novel__text--preface" in classes:
-            preface_div = div
-        elif "p-novel__text--afterword" in classes:
-            afterword_div = div
-        else:
-            main_div = div
 
-    if not main_div:
+    if not body_divs:
         raise RuntimeError("未找到正文区域（div.js-novel-text.p-novel__text）")
 
     parts = []
+    for div in body_divs:
+        # 每个不同区域之间插入分隔线
+        if parts:
+            parts.append("*" * 48)
 
-    # 前言
-    if preface_div:
-        parts.append(_extract_text_from_div(preface_div))
-        parts.append("*" * 48)
-
-    # 正文主体
-    parts.append(_extract_text_from_div(main_div))
-
-    # 后记
-    if afterword_div:
-        parts.append("*" * 48)
-        parts.append(_extract_text_from_div(afterword_div))
+        parts.append(_extract_text_from_div(div))
 
     body_text = "\n\n".join(parts)
 
