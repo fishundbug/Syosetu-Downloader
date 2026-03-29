@@ -167,16 +167,34 @@ def fetch_novel_chapter_links(novel_url: str) -> tuple[str, list[str]]:
     return novel_title, chapter_urls
 
 
-def _parse_range(range_str: str, total: int) -> tuple[int, int]:
-    """解析下载范围字符串，返回 (start_idx, end_idx) 0-based。"""
-    range_match = re.match(r"(\d+)\s*[-~]\s*(\d+)", range_str)
-    if range_match:
-        start = max(0, int(range_match.group(1)) - 1)
-        end = min(total, int(range_match.group(2)))
-        if start < end:
-            return start, end
-    print("  无效范围，将下载全部。")
-    return 0, total
+def _parse_range(range_str: str, total: int) -> list[int]:
+    """
+    解析多段下载范围字符串，返回 0-based 索引列表（去重、排序）。
+    支持格式：1-5,9,25-40
+    """
+    indices = set()
+    for segment in range_str.split(","):
+        segment = segment.strip()
+        if not segment:
+            continue
+        range_match = re.match(r"(\d+)\s*[-~]\s*(\d+)$", segment)
+        single_match = re.match(r"(\d+)$", segment)
+        if range_match:
+            start = max(1, int(range_match.group(1)))
+            end = min(total, int(range_match.group(2)))
+            indices.update(range(start - 1, end))  # 转为 0-based
+        elif single_match:
+            num = int(single_match.group(1))
+            if 1 <= num <= total:
+                indices.add(num - 1)
+        else:
+            print(f"  无法识别的片段: {segment}，已跳过。")
+
+    if not indices:
+        print("  未解析到有效范围，将下载全部。")
+        return list(range(total))
+
+    return sorted(indices)
 
 
 def download_novel_batch(
@@ -219,18 +237,18 @@ def download_novel_batch(
 
     # --- 下载范围 ---
     if range_str is not None:
-        start_idx, end_idx = _parse_range(range_str, total)
+        selected_indices = _parse_range(range_str, total)
     else:
         print(f"\n  下载范围（共 {total} 章）：")
-        range_input = input("  直接回车下载全部，或输入范围（如 10-50）：").strip()
+        range_input = input("  直接回车下载全部，或输入范围（如 1-5,9,25-40）：").strip()
         if range_input:
-            start_idx, end_idx = _parse_range(range_input, total)
+            selected_indices = _parse_range(range_input, total)
         else:
-            start_idx, end_idx = 0, total
+            selected_indices = list(range(total))
 
-    selected_urls = chapter_urls[start_idx:end_idx]
+    selected_urls = [chapter_urls[i] for i in selected_indices]
     selected_total = len(selected_urls)
-    print(f"  将下载第 {start_idx + 1} ~ {end_idx} 章，共 {selected_total} 章")
+    print(f"  将下载 {selected_total} 章")
 
     # --- 随机延迟开关 ---
     if delay is not None:
@@ -283,7 +301,7 @@ def download_novel_batch(
 
         for i, ch_url in enumerate(selected_urls, 1):
             ch_match = re.search(r"/(\d+)/?$", ch_url)
-            ch_num = ch_match.group(1) if ch_match else str(start_idx + i)
+            ch_num = ch_match.group(1) if ch_match else str(i)
 
             print(f"  [{i}/{selected_total}] 正在下载……", end="", flush=True)
             try:
@@ -330,7 +348,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-m", "--mode", choices=["1", "2"], metavar="N",
                         help="保存方式: 1=合并单文件, 2=分章保存")
     parser.add_argument("-r", "--range", dest="range_str", metavar="A-B",
-                        help="下载范围, 如 10-50")
+                        help="下载范围, 如 1-5,9,25-40")
     parser.add_argument("--no-delay", action="store_true",
                         help="关闭随机延迟, 全速下载")
     return parser
@@ -371,7 +389,7 @@ def main():
         print("    <URL>                    交互式设置")
         print("    <URL> -m 1               合并为单文件")
         print("    <URL> -m 2               分章保存")
-        print("    <URL> -r 10-50           指定下载范围")
+        print("    <URL> -r 1-5,9,25-40     指定下载范围")
         print("    <URL> --no-delay         关闭随机延迟")
         print("    <URL> -m 1 -r 10-50 --no-delay  组合使用")
         print()
